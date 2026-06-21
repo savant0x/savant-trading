@@ -200,7 +200,7 @@ endpoint = "https://openrouter.ai/api/v1"
 model = "openrouter/owl-alpha"
 api_key_env = "OPENROUTER_API_KEY"
 # Your site URL — OpenRouter uses this for ranking
-referer = "https://github.com/fame0528/savant-trading"
+referer = "https://github.com/savant0x/savant-trading"
 # Your app name — shown in OpenRouter dashboard attribution
 title = "Savant Trading Engine"
 

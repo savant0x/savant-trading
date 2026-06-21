@@ -282,13 +282,20 @@ async fn get_decisions(State(state): State<AppState>) -> Json<ApiResponse<Vec<De
     // FID-114: Pin non-PASS decisions at top so actionable signals (BUY/SELL/CLOSE/ADJUST)
     // are always visible even when batch evaluation produces 40+ PASS decisions.
     // FID-119: Raised from 20 to 50 for scan_all_pairs mode (53 pairs max)
+    // FID-227: Raised to 100 when Anvil-native bypass is active (scan_all_pairs + hunt_mode
+    // + 0 positions) so all Anvil micro-cap pairs can produce verdicts without
+    // truncation. Execution sizing and portfolio-level risk limits still apply.
     const MAX_DECISIONS: usize = 50;
-    const MAX_NON_PASS: usize = 15;
+    let max_non_pass: usize = if std::env::var("SAVANT_GATE_DISABLED").is_ok() {
+        100
+    } else {
+        15
+    };
     let non_pass: Vec<DecisionRecord> = decisions
         .iter()
         .rev()
         .filter(|d| !d.action.eq_ignore_ascii_case("Pass"))
-        .take(MAX_NON_PASS)
+        .take(max_non_pass)
         .cloned()
         .collect();
     let pass: Vec<DecisionRecord> = decisions

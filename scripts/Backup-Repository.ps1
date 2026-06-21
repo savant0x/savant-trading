@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = "C:\Users\spenc\dev\savant-trading"
 $BackupPath = "$env:USERPROFILE\backups\savant-trading.git"
-$PrimarySource = "git@github.com:fame0528/savant-trading.git"
+$PrimarySource = "git@github.com:savant0x/savant-trading.git"
 
 Write-Host "Initializing backup mirror cycle..." -ForegroundColor Cyan
 

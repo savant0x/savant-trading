@@ -1401,6 +1401,7 @@ pub async fn run(
                                 divergence_threshold_pct: 0.01,
                                 interval_cycles: 1,
                                 safety_halt_threshold_pct: 0.50,
+                                token_divergence_threshold_usd: 5.00,
                             };
                         let dummy_pos = std::collections::HashMap::new();
                         let acct = portfolio.account().clone();
@@ -1537,6 +1538,7 @@ pub async fn run(
                 divergence_threshold_pct: 0.01,
                 interval_cycles: 1,
                 safety_halt_threshold_pct: 0.50,
+                token_divergence_threshold_usd: 5.00,
             };
             info!(
                 "FID-154: Heartbeat using chain '{}' (chain_id={})",
@@ -2056,6 +2058,22 @@ pub async fn run(
         {
             let mut mm = shared.monitoring_mode.write().await;
             *mm = fully_deployed;
+        }
+
+        // FID-227: Anvil-native bypass — when scan_all_pairs is active AND
+        // hunt_mode is true AND there are no open positions, the conviction gate
+        // and MAX_NON_PASS cap are counterproductive. The LLM evaluates 27
+        // illiquid Anvil micro-caps with no real price/volume data, assigns weak
+        // conviction, the gate downgrades to PASS, the 15-pair cap truncates the
+        // rest → 0 trades. Set SAVANT_GATE_DISABLED=1 so parse_decision() skips
+        // the conviction gate and confidence floor. The API layer also raises
+        // MAX_NON_PASS to 100 in this mode so all pairs can produce verdicts.
+        if config.trading.scan_all_pairs && hunt_mode && portfolio.positions().is_empty() {
+            std::env::set_var("SAVANT_GATE_DISABLED", "1");
+            debug!(
+                "FID-227: Anvil-native bypass — scan_all_pairs + hunt_mode + 0 positions → \
+                 SAVANT_GATE_DISABLED=1 (conviction gate + confidence floor skipped)"
+            );
         }
 
         // FID-118: Prune evicted pairs from active_pairs

@@ -75,6 +75,22 @@ impl RegimeLabel {
             RegimeLabel::GreyZone => 0.20,
         }
     }
+
+    /// FID-184 / FID-198: Probe threshold per regime. Conviction between this
+    /// value and `conviction_threshold()` allows entry as a probe (0.5x sizing,
+    /// auto-TP at 0.6%, 10-min auto-timeout) IF the LLM sets `is_probe: true`.
+    /// Below this threshold: action must be PASS.
+    ///
+    /// Per `src/agent/prompts/output_format.md` line 118, the probe thresholds
+    /// are: Trending 0.03, Volatile 0.08, Ranging 0.05, GreyZone 0.10.
+    pub fn probe_threshold(self) -> f64 {
+        match self {
+            RegimeLabel::Trending => 0.03,
+            RegimeLabel::Volatile => 0.08,
+            RegimeLabel::Ranging => 0.05,
+            RegimeLabel::GreyZone => 0.10,
+        }
+    }
 }
 
 /// FID-126: Trigger weights from the LLM, used to compute conviction_score.
@@ -492,17 +508,55 @@ pub fn parse_decision(
     // MUST be >= the regime's threshold. This replaces the old "3+ aligned
     // triggers" Boolean gate. ADJUST_STOP and CLOSE are NOT gated (they're
     // position management, not new exposure).
+    // FID-226 v2 normalization: is_probe is design-meaningful ONLY in the
+    // [probe_threshold, regime_threshold) zone per output_format.md:122. If the
+    // LLM sent is_probe=true outside this zone, normalize to false so downstream
+    // sizing doesn't apply probe semantics (0.5x, 0.6% TP, 10-min timeout) to
+    // a regular high-conviction trade or to a too-weak trade that should have
+    // been PASSed. This guards against two failure modes:
+    //   1. conviction >= regime_threshold with is_probe=true → would auto-apply
+    //      0.5x sizing + 10-min timeout to a full-conviction setup (premature exit).
+    //   2. conviction < probe_threshold with is_probe=true → would survive the
+    //      outside-of-window-of-truth probe and the gate downgrades to Pass anyway,
+    //      but with is_probe still true the JSON log shows a shall-pretend-thing
+    //      that the engine never executed.
+    {
+        let regime_t = decision.regime_label.conviction_threshold();
+        let probe_t = decision.regime_label.probe_threshold();
+        if decision.is_probe
+            && !(decision.conviction_score >= probe_t && decision.conviction_score < regime_t)
+        {
+            tracing::debug!(
+                "FID-226 normalize: pair={} conviction={:.3} outside [probe {:.3}, main {:.3}) \u{2014} clearing is_probe",
+                decision.pair, decision.conviction_score, probe_t, regime_t
+            );
+            decision.is_probe = false;
+        }
+    }
     let regime_threshold = decision.regime_label.conviction_threshold();
+    let probe_threshold_val = decision.regime_label.probe_threshold();
     if !bypass_gates && is_entry && decision.conviction_score < regime_threshold {
-        tracing::info!(
-            "FID-126 Conviction gate: conviction={:.3} < regime={:?} threshold={:.2} — downgrading {:?} to Hold",
-            decision.conviction_score,
-            decision.regime_label,
-            regime_threshold,
-            decision.action
-        );
-        decision.action = TradeAction::Pass;
-        decision.override_source = Some("conviction_gate".to_string());
+        // FID-184 / FID-198 probe escape hatch: if LLM set is_probe=true and
+        // conviction is >= probe_threshold, allow entry as a probe instead of
+        // downgrading to Pass. Below probe_threshold with is_probe=true: still
+        // downgrade (probe signal too weak to surface as a 0.5x scratch trade).
+        if decision.is_probe && decision.conviction_score >= probe_threshold_val {
+            tracing::info!(
+                "FID-198 PROBE EXIT: pair={} regime={:?} conviction={:.3} (>=probe {:.3}, <main {:.3}) — allowing {:?} as probe (0.5x sizing)",
+                decision.pair, decision.regime_label, decision.conviction_score,
+                probe_threshold_val, regime_threshold, decision.action
+            );
+        } else {
+            tracing::info!(
+                "FID-126 Conviction gate: conviction={:.3} < regime={:?} threshold={:.2} — downgrading {:?} to Hold",
+                decision.conviction_score,
+                decision.regime_label,
+                regime_threshold,
+                decision.action
+            );
+            decision.action = TradeAction::Pass;
+            decision.override_source = Some("conviction_gate".to_string());
+        }
     } else if bypass_gates && is_entry && decision.conviction_score < regime_threshold {
         tracing::debug!(
             "FID-126 bypass: conviction gate skipped, allowing {:?} with conviction={:.3} (below {:.2} threshold for {:?})",
@@ -1623,6 +1677,195 @@ Some extra reasoning text that leaked into the response..."#;
 
         let decision = parse_decision(&json.to_string(), 0.0953, 10.0).unwrap();
         assert!(!decision.is_probe);
+    }
+
+    // FID-184 / FID-198: Conviction gate probe escape hatch tests.
+
+    #[test]
+    fn is_probe_conviction_between_probe_and_main_thr_passes() {
+        // Trending: probe_threshold=0.03, conviction_threshold=0.05.
+        // conviction=0.04 with is_probe=true → NOT downgraded (probe exit fires).
+        let json = serde_json::json!({
+            "action": "Buy",
+            "pair": "WIF/USD",
+            "side": "Long",
+            "entry_price": 0.50,
+            "stop_loss": 0.49,
+            "take_profit_1": 0.51,
+            "position_size_pct": 50.0,
+            "confidence": 0.5,
+            "conviction_score": 0.04,
+            "regime_label": "Trending",
+            "is_probe": true,
+            "reasoning": "low conviction probe in trending regime",
+            "knowledge_sources": [],
+            "risk_reward": 1.5
+        });
+        let decision = parse_decision(&json.to_string(), 0.50, 10.0).unwrap();
+        assert_eq!(decision.action, TradeAction::Buy);
+        assert!(decision.is_probe);
+        assert_eq!(decision.override_source, None);
+    }
+
+    #[test]
+    fn is_probe_conviction_below_probe_thr_downgrades() {
+        // Trending: probe_threshold=0.03.
+        // conviction=0.02 with is_probe=true → still downgraded (below probe).
+        let json = serde_json::json!({
+            "action": "Buy",
+            "pair": "WIF/USD",
+            "side": "Long",
+            "entry_price": 0.50,
+            "stop_loss": 0.49,
+            "take_profit_1": 0.51,
+            "position_size_pct": 50.0,
+            "confidence": 0.5,
+            "conviction_score": 0.02,
+            "regime_label": "Trending",
+            "is_probe": true,
+            "reasoning": "too weak even for probe",
+            "knowledge_sources": [],
+            "risk_reward": 1.5
+        });
+        let decision = parse_decision(&json.to_string(), 0.50, 10.0).unwrap();
+        assert_eq!(decision.action, TradeAction::Pass);
+        // FID-226 v2: conviction=0.02 < probe_threshold (0.03) → is_probe
+        // normalized off (probe semantics only meaningful in design window).
+        assert!(!decision.is_probe);
+        assert_eq!(decision.override_source.as_deref(), Some("conviction_gate"));
+    }
+
+    #[test]
+    fn is_probe_disabled_with_low_conviction_still_downgrades() {
+        // Existing behavior preserved: is_probe=false with conviction between
+        // probe and main threshold still downgrades (no probe escape allowed).
+        let json = serde_json::json!({
+            "action": "Buy",
+            "pair": "WIF/USD",
+            "side": "Long",
+            "entry_price": 0.50,
+            "stop_loss": 0.49,
+            "take_profit_1": 0.51,
+            "position_size_pct": 50.0,
+            "confidence": 0.5,
+            "conviction_score": 0.04,
+            "regime_label": "Trending",
+            "is_probe": false,
+            "reasoning": "low conviction but probe not flagged",
+            "knowledge_sources": [],
+            "risk_reward": 1.5
+        });
+        let decision = parse_decision(&json.to_string(), 0.50, 10.0).unwrap();
+        assert_eq!(decision.action, TradeAction::Pass);
+        assert!(!decision.is_probe);
+        assert_eq!(decision.override_source.as_deref(), Some("conviction_gate"));
+    }
+
+    // FID-226 v2: Normalization tests (is_probe clamped to design window).
+
+    #[test]
+    fn is_probe_normalized_false_above_main_threshold() {
+        // Trending: probe=0.03, main=0.05. conviction=0.10 (above main).
+        // Without normalization, is_probe=true would survive the gate and
+        // downstream sizing would auto-apply 0.5x + 10-min timeout to a
+        // high-conviction trade \u{2014} an unintended premature-exit pattern.
+        let json = serde_json::json!({
+            "action": "Buy",
+            "pair": "BTC/USD",
+            "side": "Long",
+            "entry_price": 65000.0,
+            "stop_loss": 64000.0,
+            "take_profit_1": 66500.0,
+            "position_size_pct": 50.0,
+            "confidence": 0.5,
+            "conviction_score": 0.10,
+            "regime_label": "Trending",
+            "is_probe": true,
+            "reasoning": "high conviction tagged as probe by mistake",
+            "knowledge_sources": [],
+            "risk_reward": 2.5
+        });
+        let decision = parse_decision(&json.to_string(), 65000.0, 10.0).unwrap();
+        assert_eq!(decision.action, TradeAction::Buy);
+        assert!(
+            !decision.is_probe,
+            "is_probe must normalize off above main threshold"
+        );
+    }
+
+    #[test]
+    fn is_probe_normalized_false_below_probe_threshold() {
+        // Trending: probe=0.03. conviction=0.02 (below probe).
+        // Even with is_probe=true, must PASS and is_probe must be cleared.
+        let json = serde_json::json!({
+            "action": "Buy",
+            "pair": "BTC/USD",
+            "side": "Long",
+            "entry_price": 65000.0,
+            "stop_loss": 64000.0,
+            "take_profit_1": 66500.0,
+            "position_size_pct": 50.0,
+            "confidence": 0.5,
+            "conviction_score": 0.02,
+            "regime_label": "Trending",
+            "is_probe": true,
+            "reasoning": "too weak even for probe",
+            "knowledge_sources": [],
+            "risk_reward": 2.5
+        });
+        let decision = parse_decision(&json.to_string(), 65000.0, 10.0).unwrap();
+        assert_eq!(decision.action, TradeAction::Pass);
+        assert!(
+            !decision.is_probe,
+            "is_probe must normalize off below probe threshold"
+        );
+        assert_eq!(decision.override_source.as_deref(), Some("conviction_gate"));
+    }
+
+    #[test]
+    fn is_probe_stays_in_design_window_all_four_regimes() {
+        // Verifies probe_threshold() returns the right per-regime value AND
+        // normalization preserves is_probe when conviction is mid-zone for each
+        // of the four regimes. Plus catches copy-paste errors in the match arms.
+        let cases: &[(&str, f64)] = &[
+            ("Trending", 0.04), // probe 0.03, main 0.05
+            ("Volatile", 0.10), // probe 0.08, main 0.15
+            ("Ranging", 0.07),  // probe 0.05, main 0.10
+            ("GreyZone", 0.15), // probe 0.10, main 0.20
+        ];
+        for (regime, conviction) in cases {
+            let pair = format!("{}/USD", regime);
+            let reasoning = format!("probe in {}", regime);
+            let json = serde_json::json!({
+                "action": "Buy",
+                "pair": pair,
+                "side": "Long",
+                "entry_price": 1.0,
+                "stop_loss": 0.99,
+                "take_profit_1": 1.02,
+                "position_size_pct": 50.0,
+                "confidence": 0.5,
+                "conviction_score": conviction,
+                "regime_label": regime,
+                "is_probe": true,
+                "reasoning": reasoning,
+                "knowledge_sources": [],
+                "risk_reward": 2.0
+            });
+            let decision = parse_decision(&json.to_string(), 1.0, 10.0).unwrap();
+            assert_eq!(
+                decision.action,
+                TradeAction::Buy,
+                "regime={} conviction={} should fire probe exit (Buy)",
+                regime,
+                conviction
+            );
+            assert!(
+                decision.is_probe,
+                "regime={} conviction={} should retain is_probe",
+                regime, conviction
+            );
+        }
     }
 
     // FID-206: LONG/SHORT/NO_SIGNAL vocabulary alias tests.

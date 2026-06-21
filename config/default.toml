@@ -100,14 +100,28 @@ pairs = [
     "ENA/USD", "MAGIC/USD", "GNS/USD", "JOE/USD",
 ]
 full_deploy = true
-# FID-189: scan_all_pairs = false activates the existing smart pre-scoring
-# at engine/mod.rs:2052-2120. The pre-scoring skips pairs with no signal
-# (RSI extreme, ADX trend, EMA cross, volume spike, BB squeeze) before
-# sending to the LLM. With scan_all_pairs = true, the LLM receives 30-50
-# pairs and defaults to 0% conviction (default-to-hold bias). With it
-# off, the LLM sees only pairs with measurable setups.
-scan_all_pairs = false
-min_volume_24h_usd = 1500000.0
+# FID-189 ROLLBACK 2026-06-21 (FID-226): scan_all_pairs = true. Pre-funnel
+# rationale for 'false' (FID-189: prevent LLM default-to-hold bias by pre-scoring
+# only profitable pairs) is now superseded by:
+#   - FID-222 funnel (top-K selection via 6-signal composite scoring)
+#   - FID-226 probe-threshold method + verdict gate 'is_probe' escape hatch
+#     (Trending 0.03 / Volatile 0.08 / Ranging 0.05 / GreyZone 0.10)
+# With these in place, scan_all_pairs=true routes the engine to
+# candle_api.discover_safe_usd_pairs() (Kraken REST AssetPairs + Ticker per
+# pair, batched in chunks of 20) — replacing the static 18-pair TOML static
+# list with the discoverable universe (~150-300 USD pairs / Kraken-listed).
+# Pair universe expansion is the first half of FID-226; the probe-escape is
+# the second half. Both ship together because a single fix leaves the other
+# half dead.
+#
+# FID-226 LIVE-EXEC WARNING: with scan_all_pairs=true AND live_execution=true
+# (the production switch), the engine dispatches ~150-300 USD-pair candidates
+# per cycle instead of 18. Capital exposure breadth increases 10-17x. The
+# conviction gate (probe escape hatch) still filters weak signals, but the
+# *breadth* of attempted trades climbs. Tune risk_pct and max_positions
+# accordingly BEFORE flipping live_execution=false → true.
+scan_all_pairs = true
+min_volume_24h_usd = 500000.0
 min_price_usd = 0.001
 blacklisted_symbols = []
 timeframe = "5m"
@@ -233,10 +247,10 @@ is_anvil = false
 #   endpoint = "https://api.tokenrouter.com/v1"
 #   model = "MiniMax-M3"
 #   api_key_env = "TOKEN_ROUTER_API_KEY"
-provider = "nvidia"
-endpoint = "https://integrate.api.nvidia.com/v1"
-model = "minimaxai/minimax-m3"
-api_key_env = "NVIDIA_API_KEY"
+provider = "openrouter"
+endpoint = "https://openrouter.ai/api/v1"
+model = "openrouter/owl-alpha"
+api_key_env = "OPENROUTER_API_KEY"
 autonomy_level = 3
 max_decisions_per_hour = 20
 # Expanded to use more of the 1M context window (FID-015)
@@ -262,7 +276,7 @@ endpoint = "https://openrouter.ai/api/v1"
 model = "openrouter/owl-alpha"
 api_key_env = "OPENROUTER_API_KEY"
 # Your site URL — OpenRouter uses this for ranking
-referer = "https://github.com/fame0528/savant-trading"
+referer = "https://github.com/savant0x/savant-trading"
 # Your app name — shown in OpenRouter dashboard attribution
 title = "Savant Trading Engine"
 

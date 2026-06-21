@@ -25,7 +25,7 @@ I am a solo developer building a crypto trading engine (Rust backend, Next.js da
 
 **My situation:**
 - Solo developer (just me + Vera)
-- Project: https://github.com/fame0528/savant-trading
+- Project: https://github.com/savant0x/savant-trading
 - Current version: v0.14.5
 - Tech stack: Rust 1.91, Node 16.2.7, Next.js 16, 350+ tests
 - Development cycle: 2-4 hours per session, multiple sessions per day (sometimes 3-5 in 24h)

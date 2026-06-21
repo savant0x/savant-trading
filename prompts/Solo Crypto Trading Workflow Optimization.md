@@ -192,7 +192,7 @@ body \= """
 {% for group, commits in commits | group\_by(attribute="group") %}  
 \#\#\# {{ group | upper\_first }}  
 {% for commit in commits %}  
-\- {% if commit.scope %}\*{{ commit.scope }}\*: {% endif %}{{ commit.message | split(pat="\\n") | first | upper\_first | trim }} (\[{{ commit.id | truncate(length=7, end="") }}\](https://github.com/fame0528/savant-trading/commit/{{ commit.id }}))  
+\- {% if commit.scope %}\*{{ commit.scope }}\*: {% endif %}{{ commit.message | split(pat="\\n") | first | upper\_first | trim }} (\[{{ commit.id | truncate(length=7, end="") }}\](https://github.com/savant0x/savant-trading/commit/{{ commit.id }}))  
 {%- if commit.footers %}  
   {% for footer in commit.footers %}  
   \* {{ footer.token }}: {{ footer.value }}  
@@ -218,7 +218,7 @@ commit\_parsers \=+\\\\)", group \= "🚀 Features (FID Core)" },
     { message \= "^refactor", group \= "🚜 Refactoring" },  
     { message \= ".\*", group \= "⚙️ Miscellaneous Development" }  
 \]  
-commit\_preprocessors \=+)', replace \= "(https://github.com/fame0528/savant-trading/issues/${1})" }  
+commit\_preprocessors \=+)', replace \= "(https://github.com/savant0x/savant-trading/issues/${1})" }  
 \]  
 filter\_commits \= false  
 topo\_order \= false  
@@ -473,7 +473,7 @@ The repository must utilize automated, high-fidelity badges, precise technology 
 
 # **Savant Trading Engine**
 
-(https://img.shields.io/github/actions/workflow/status/fame0528/savant-trading/release.yml?style=flat-square\&logo=rust\&color=orange)\](https://github.com/fame0528/savant-trading/actions) ([https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square))\]([https://opensource.org/licenses/MIT](https://opensource.org/licenses/MIT))   
+(https://img.shields.io/github/actions/workflow/status/savant0x/savant-trading/release.yml?style=flat-square\&logo=rust\&color=orange)\](https://github.com/savant0x/savant-trading/actions) ([https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square))\]([https://opensource.org/licenses/MIT](https://opensource.org/licenses/MIT))   
 Savant is a high-performance, asynchronous cryptocurrency algorithmic trading engine written in Rust, featuring a real-time monitoring dashboard built in Next.js.  
 If the codebase contains proprietary alpha-generating trading strategies or custom execution logic, maintaining a highly discoverable public repository increases the risk of reverse-engineering or exploitation. In this scenario, the repository must remain strictly private, rendering public badges and topics unnecessary.  
 To migrate, the developer must append the markdown badges to the top of the README, assign the repository topics on GitHub, and generate a secure architectural flowchart to use as the social preview image.
@@ -490,7 +490,7 @@ PowerShell
 $ErrorActionPreference \= "Stop"
 
 $BackupPath \= "$env:USERPROFILE/backups/savant-trading.git"  
-$PrimarySource \= "git@github.com:fame0528/savant-trading.git"  
+$PrimarySource \= "git@github.com:savant0x/savant-trading.git"  
 $SecondaryRemote \= "git@gitlab.com:savant-backups/savant-trading.git"
 
 Write-Host "Initializing backup mirror cycle..." \-ForegroundColor Cyan

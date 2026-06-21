@@ -22,7 +22,7 @@ set -euo pipefail
 PROJECT_NAME="savant-trading"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CURRENT_VERSION="$(cat "${PROJECT_ROOT}/VERSION" 2>/dev/null || grep '^version' "${PROJECT_ROOT}/Cargo.toml" | head -1 | sed 's/.*= *"\(.*\)".*/\1/')"
-REPO_SLUG="fame0528/savant-trading"
+REPO_SLUG="savant0x/savant-trading"
 
 # ── Color output helpers ──────────────────────────────────────────
 RED='\033[0;31m'

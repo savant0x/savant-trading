@@ -1,4 +1,4 @@
-# SAVANT TRADING v0.15.7
+# SAVANT TRADING v0.15.8
 
 <!-- markdownlint-disable MD033 -->
 <div align="center">
@@ -11,7 +11,7 @@ No KYC. No CEX. Arbitrum on-chain swaps via 0x API — powered by 6,676+ knowled
 
 **Model-agnostic:** Any OpenAI-compatible LLM via [OpenRouter](https://openrouter.ai/). Default: [Owl Alpha](https://openrouter.ai/openrouter/owl-alpha) (free, 1M context, 2.25T weekly tokens). Previously tested with MiMo v2.5 Pro.
 
-[![Rust](https://img.shields.io/badge/Rust-2021-%23000000?style=flat-square&logo=rust&logoColor=%2300fbff)](https://www.rust-lang.org/)[![0x](https://img.shields.io/badge/0x-DEX-%23000000?style=flat-square&logo=ethereum&logoColor=%2300fbff)](https://0x.org/)[![Arbitrum](https://img.shields.io/badge/Arbitrum-L2-%23000000?style=flat-square&logo=arbitrum&logoColor=%2300fbff)](https://arbitrum.io/)[![OpenRouter](https://img.shields.io/badge/OpenRouter-LLM-%23000000?style=flat-square&logo=openai&logoColor=%2300fbff)](https://openrouter.ai/)[![Version](https://img.shields.io/badge/Version-0.15.7-%23000000?style=flat-square&logo=semver&logoColor=%2300fbff)](https://github.com/fame0528/savant-trading/releases)[![License](https://img.shields.io/badge/License-Proprietary-%23000000?style=flat-square&logo=lock&logoColor=%2300fbff)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-2021-%23000000?style=flat-square&logo=rust&logoColor=%2300fbff)](https://www.rust-lang.org/)[![0x](https://img.shields.io/badge/0x-DEX-%23000000?style=flat-square&logo=ethereum&logoColor=%2300fbff)](https://0x.org/)[![Arbitrum](https://img.shields.io/badge/Arbitrum-L2-%23000000?style=flat-square&logo=arbitrum&logoColor=%2300fbff)](https://arbitrum.io/)[![OpenRouter](https://img.shields.io/badge/OpenRouter-LLM-%23000000?style=flat-square&logo=openai&logoColor=%2300fbff)](https://openrouter.ai/)[![Version](https://img.shields.io/badge/Version-0.15.8-%23000000?style=flat-square&logo=semver&logoColor=%2300fbff)](https://github.com/savant0x/savant-trading/releases)[![License](https://img.shields.io/badge/License-Proprietary-%23000000?style=flat-square&logo=lock&logoColor=%2300fbff)](LICENSE)
 
 </div>
 
@@ -174,7 +174,7 @@ The 168 source books span candlestick analysis, technical analysis, trading psyc
 ### Setup
 
 ```bash
-git clone https://github.com/fame0528/savant-trading.git
+git clone https://github.com/savant0x/savant-trading.git
 cd savant-trading
 
 # Copy environment template and fill in your keys
@@ -411,13 +411,13 @@ The risk layer is **independent of the AI brain** — the agent cannot override 
 
 ```bash
 cargo build
-cargo test # 508 tests (lib + integration + 10 main.rs binary + doc-tests; Funnel v1 library + engine wiring + runtime telemetry + pre-loop safety guard; FID-222 + FID-222.6 + FID-222.7 + FID-222.8)
+cargo test # 514 tests (lib + integration + 10 main.rs binary + doc-tests; Funnel v1 library + engine wiring + runtime telemetry + pre-loop safety guard; FID-222 + FID-222.6 + FID-222.7 + FID-222.8; FID-225 reconciliation phantom-position classification)
 cargo clippy -- -D warnings
 ```
 
 ### Savant Protocol
 
-All development follows the [Savant Protocol](https://github.com/fame0528/savant-protocol):
+All development follows the [Savant Protocol](https://github.com/savant0x/savant-protocol):
 - 4 immutable process laws (Read-0-EOF, Present-Before-Act, Verify-Before-Proceed, Call-Graph Reachability)
 - Perfection Loop FSM (RED → GREEN → AUDIT → SELF-CORRECT → COMPLETE)
 - Session lifecycle management
@@ -427,7 +427,7 @@ All development follows the [Savant Protocol](https://github.com/fame0528/savant
 Bugs and improvements tracked via FIDs:
 
 - Active FIDs: 4 (see [MASTER-FID.md](dev/fids/MASTER-FID.md))
-- 234 archived FIDs
+- 228 archived FIDs (4 unarchived: FID-222, FID-225, FID-226, FID-227)
 
 ---
 

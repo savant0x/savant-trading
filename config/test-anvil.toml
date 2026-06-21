@@ -78,9 +78,16 @@ pairs = [
     "ENA/USD", "MAGIC/USD", "GNS/USD", "JOE/USD",
 ]
 full_deploy = true
-# FID-189: see comment in config/default.toml
-scan_all_pairs = false
-min_volume_24h_usd = 1500000.0
+# FID-189 ROLLBACK 2026-06-21 (FID-226): scan_all_pairs = true routes engine to
+# candle_api.discover_safe_usd_pairs() (Kraken REST AssetPairs + Ticker per
+# pair, batched in chunks of 20). Prior 'false' capped pair universe at the
+# static 18-pair TOML list → ~12 pairs after hygiene filters → 0 BUYs over
+# 12+ hours of FID-225 post-hotfix running. The new universe is ~150-300
+# tradable USD pairs. Partner fix at FID-226: probe_threshold-method + verdict
+# gate 'is_probe' escape hatch in decision_parser.rs so the larger universe
+# doesn't get drowned in PASS verdicts.
+scan_all_pairs = true
+min_volume_24h_usd = 500000.0
 min_price_usd = 0.001
 blacklisted_symbols = []
 timeframe = "5m"
@@ -96,6 +103,14 @@ slippage_pct = 0.0030
 interval_cycles = 60
 eviction_threshold = 5
 revival_check_cycles = 300
+
+# FID-227: Funnel v1 enabled on testnet so the top-K selection path is live.
+# In hunt_mode (0 positions) the funnel still bypasses (PassThrough), but the
+# Anvil-native bypass in src/engine/mod.rs handles that case via SAVANT_GATE_DISABLED.
+[trading.funnel_v1]
+enabled = true
+top_k = 12
+min_score_threshold = 0.20
 
 [token_store]
 enabled = true
@@ -159,10 +174,10 @@ is_anvil = true
 # FID-200/204/205/206/207/208 code paths PRESERVED — only the active provider
 # changed. To re-enable NVIDIA NIM jury, uncomment NVIDIA_API_KEY* in .env
 # AND change provider back to "nvidia".
-provider = "tokenrouter"
-endpoint = "https://api.tokenrouter.com/v1"
-model = "MiniMax-M3"
-api_key_env = "TOKEN_ROUTER_API_KEY"
+provider = "openrouter"
+endpoint = "https://openrouter.ai/api/v1"
+model = "openrouter/owl-alpha"
+api_key_env = "OPENROUTER_API_KEY"
 autonomy_level = 3
 max_decisions_per_hour = 20
 context_window_candles = 500
@@ -179,7 +194,7 @@ disable_thinking = true
 endpoint = "https://openrouter.ai/api/v1"
 model = "openrouter/owl-alpha"
 api_key_env = "OPENROUTER_API_KEY"
-referer = "https://github.com/fame0528/savant-trading"
+referer = "https://github.com/savant0x/savant-trading"
 title = "Savant Trading Engine"
 
 [ai.jury]

@@ -623,6 +623,40 @@ impl<B: DexBackend + 'static> DexTrader<B> {
             );
         }
 
+        // FID-227: Defensive purge of stale dex_state.json on Anvil startup.
+        // If a previous session left phantom positions (e.g. the ai-1 $28.33
+        // phantom from v0.15.7 cycle ~34), the engine would re-ingest them on
+        // restart and halt. Anvil is a forked local chain — there is no real
+        // position to recover. Purge is safe: any real position was already
+        // settled or is unrecoverable on a fork.
+        if trader.is_anvil && trader.state_path.exists() {
+            match std::fs::read_to_string(&trader.state_path) {
+                Ok(content) => {
+                    let should_purge = match serde_json::from_str::<serde_json::Value>(&content) {
+                        Ok(val) => val
+                            .pointer("/positions")
+                            .and_then(|p| p.as_array())
+                            .map(|arr| !arr.is_empty())
+                            .unwrap_or(false),
+                        Err(_) => true, // malformed JSON — purge to be safe
+                    };
+                    if should_purge {
+                        info!(
+                            "FID-227: Anvil defensive purge — clearing stale positions from {:?}",
+                            trader.state_path
+                        );
+                        if let Err(e) = std::fs::remove_file(&trader.state_path) {
+                            warn!("FID-227: Failed to purge {:?}: {}", trader.state_path, e);
+                        }
+                    }
+                }
+                Err(e) => warn!(
+                    "FID-227: Failed to read {:?} for purge check: {}",
+                    trader.state_path, e
+                ),
+            }
+        }
+
         // Sync real on-chain balances immediately — don't trust config starting_balance
         let balance_before_sync = trader.balance;
         if let Err(e) = trader.sync_balance().await {

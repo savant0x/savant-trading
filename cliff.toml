@@ -16,7 +16,7 @@ body = """
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | upper_first }}
 {% for commit in commits %}
-- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ commit.message | split(pat="\n") | first | upper_first | trim }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/fame0528/savant-trading/commit/{{ commit.id }})){%- if commit.footers %}
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ commit.message | split(pat="\n") | first | upper_first | trim }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/savant0x/savant-trading/commit/{{ commit.id }})){%- if commit.footers %}
   {% for footer in commit.footers %}
   - {{ footer.token }}: {{ footer.value }}
   {% endfor %}
@@ -44,7 +44,7 @@ commit_parsers = [
   { message = ".*", group = "Other" },
 ]
 commit_preprocessors = [
-  { pattern = '\(FID-([0-9]+)\)', replace = "([FID-${1}](https://github.com/fame0528/savant-trading/issues/${1}))" },
+  { pattern = '\(FID-([0-9]+)\)', replace = "([FID-${1}](https://github.com/savant0x/savant-trading/issues/${1}))" },
 ]
 filter_commits = false
 topo_order = false

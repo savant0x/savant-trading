@@ -80,7 +80,9 @@ Scalping entries require:
 3. **Single target** — 0.8-1.2% based on ATR and momentum
 4. **No hesitation** — if setup is there, execute immediately
 
-**3+ Action Triggers = ACT (FID-126 — v0.14.0 replaced by conviction-weighted).** Do not overthink a 0.8% trade. The current rule is **conviction-weighted**: emit `conviction_score` from `trigger_weights` and let the parser enforce the regime-dependent threshold (Trending 0.30, Volatile 0.40, Ranging 0.40, GreyZone 0.40).
+**3+ Action Triggers = ACT (FID-126 — v0.14.0 replaced by conviction-weighted).** Do not overthink a 0.8% trade. The current rule is **conviction-weighted**: emit `conviction_score` from `trigger_weights` and let the parser enforce the regime-dependent threshold (Trending 0.05, Volatile 0.15, Ranging 0.10, GreyZone 0.20).
+
+**Probe path (FID-184 / FID-198):** If your conviction is between the probe threshold (Trending 0.03 / Volatile 0.08 / Ranging 0.05 / GreyZone 0.10) and the main threshold, output `is_probe: true` plus the directional action. The engine treats probes as 0.5x sizing with auto-TP at 0.6% and 10-minute auto-timeout. This widens the tradeable zone (without crossing into scam-coin territory) so a quiet market still produces flow data. Below the probe threshold: must output `action: PASS`.
 
 ### 3.2 Management: Breakeven Fast
 
@@ -117,7 +119,9 @@ If a trade hasn't moved 0.3% in your favor within 5 minutes, close it. The setup
 
 **EMIT THE JSON ACTION BLOCK FIRST IN YOUR RESPONSE.** Reasoning and elaboration come AFTER the action block. Keep total response under 1,500 tokens. This prevents the verbosity bug where M3 exhausts the token budget on chain-of-thought and never emits the action JSON.
 
-**Conviction-weighted entry (FID-126 — v0.14.0).** Compute `conviction_score = clamp(sum(trigger_weights) / 3.0)` where weights are strong=1.0, moderate=0.65, weak=0.3. If `conviction_score >= regime_threshold` (Trending 0.30, Ranging/Volatile/GreyZone 0.40), ENTER. No thesis required for a 0.8% scalp — the conviction IS the thesis.
+**Conviction-weighted entry (FID-126 / FID-184 / FID-198 — v0.14.5+).** Compute `conviction_score = clamp(sum(trigger_weights) / 3.0)` where weights are strong=1.0, moderate=0.65, weak=0.3. If `conviction_score >= regime_threshold` (Trending 0.05, Volatile 0.15, Ranging 0.10, GreyZone 0.20), ENTER. No thesis required for a 0.8% scalp — the conviction IS the thesis.
+
+**Probe escape (FID-184):** conviction between the probe threshold (Trending 0.03 / Volatile 0.08 / Ranging 0.05 / GreyZone 0.10) and the main threshold → output `is_probe: true` along with the Buy/Sell action. The engine applies 0.5x sizing, 0.6% auto-TP, 10-minute timeout. Below probe_threshold: output `action: PASS`.
 
 ### 4.2 Exit Strategy: Single Target
 
