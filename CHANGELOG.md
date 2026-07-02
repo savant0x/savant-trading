@@ -1,4 +1,4 @@
-## [0.15.8] - 2026-06-24 — FID-227 Anvil-Native Token Universe Unblock + FID-226 follow-on
+## [0.15.8] - 2026-06-25 — FID-227 Anvil-Native Token Universe Unblock + FID-228/229 M3 Decouple
 
 ### Fixed
 
@@ -11,6 +11,34 @@
 ### Changed
 
 - `config/default.toml` + `config/test-anvil.toml`: `min_volume_24h_usd` lowered from $1,500,000 → $500,000 to expand Kraken universe toward the 500-pair target.
+
+- **FID-228** — Jury system decoupled from MiniMax-M3 hardcode. `JuryStateSnapshot` fields renamed: `m3_control_active` → `control_active`, `estimated_m3_calls` → `estimated_control_calls`. New `control_model: String` field populated from `config.ai.model` (the actual agent model). Config `default_jury_models()` no longer includes `minimax/minimax-m3` — replaced with `openrouter/owl-alpha:free`. Dashboard jury section now shows dynamic model name or generic "Ctrl" label instead of hardcoded "M3 ctrl" / "M3 calls".
+  - `src/core/shared.rs`: struct field rename + new field.
+  - `src/engine/mod.rs`: snapshot population uses new field names.
+  - `src/agent/jury/pool.rs`: `provider_config_m3` → `provider_config_control`, `m3_api_key` → `control_api_key`, `m3_calls()` → `control_calls()`.
+  - `src/core/config.rs`: M3 removed from `default_jury_models()`.
+  - `dashboard/src/lib/api.ts`: `JuryStateSnapshot` interface updated to match.
+  - `dashboard/src/lib/copy.ts`: label "M3 control" → "Ctrl", "M3 calls" → "Ctrl calls".
+  - `dashboard/src/app/page.tsx`: dynamic `control_model` label.
+
+- **FID-229** — Removed dead M3 proxy launch from `start.bat`. The `m3-proxy.bat` / `scripts/m3-proxy-controller.bat` / `scripts/m3-proxy.js` chain was a "Thinking Killer" proxy for MiniMax M3 — no longer needed since the engine calls OpenRouter directly. Pre-build cleanup filter also scrubbed of `m3-proxy` cmdline pattern.
+  - `start.bat`: removed M3 proxy launch block (lines 82-91) and `m3-proxy` cleanup filter.
+
+### Config cleanup (FID-229 follow-on)
+
+- **`src/main.rs`**: Config load failure now exits with error instead of silently falling back to hardcoded `AppConfig::default()` (provider="nvidia", model="deepseek"). This prevents the engine from running with wrong/stale defaults when the TOML is missing or malformed.
+- **`config/test-anvil.toml`**: Removed entire `[ai]` + `[sandbox]` blocks. Anvil now inherits all model/provider config from `default.toml` — only chain-specific settings (RPC URLs, mode) remain. Eliminates config drift between live and testnet.
+- **`config/default.toml`**: Removed dead `[ai.tokenrouter]` section. Updated `[sandbox]` to use `openrouter/owl-alpha:free` instead of `MiniMax-M3`/tokenrouter. Replaced `minimax/minimax-m3` in jury models with `openrouter/owl-alpha:free`.
+
+### Verified
+
+- `cargo check --workspace --all-targets`: clean
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean
+- `cargo fmt --check`: clean
+- `cargo test --workspace --all-targets`: 523/523 pass
+- `next build` (dashboard): TypeScript passes, build succeeds
+- No references to port 4000, M3 proxy, or tokenrouter in active engine/config code
+- `config/test-anvil.toml` `[ai]` section removed — inherits from default.toml
 
 ## [0.15.7-a.1] - 2026-06-21 — FID-225 Phantom-Position Classification (round 1 + round 2 combined)
 

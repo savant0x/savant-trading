@@ -244,8 +244,8 @@ is_anvil = false
 #
 # To switch back to TokenRouter:
 #   provider = "tokenrouter"
-#   endpoint = "https://api.tokenrouter.com/v1"
-#   model = "MiniMax-M3"
+#   endpoint = "https://openrouter.ai/api/v1"
+#   model = "openrouter/owl-alpha:free"
 #   api_key_env = "TOKEN_ROUTER_API_KEY"
 provider = "openrouter"
 endpoint = "https://openrouter.ai/api/v1"
@@ -284,11 +284,11 @@ title = "Savant Trading Engine"
 # FID-200: 10 NVIDIA NIM models for multi-model consensus. All verified
 # working via /v1/chat/completions. Diverse vendor mix dilutes single-model bias.
 # Vendor breakdown: 2 Meta, 2 DeepSeek, 1 NVIDIA, 1 Alibaba (Qwen),
-# 1 Mistral, 1 Moonshot (Kimi), 1 Z.ai (GLM), 1 MiniMax (M3 — tiebreaker).
+# 1 Mistral, 1 Moonshot (Kimi), 1 Z.ai (GLM), 1 OpenRouter (owl-alpha — tiebreaker).
 # OpenRouter preserved as fallback (see key_manager for OpenRouter provisioning).
 enabled = true
 jury_size = 10
-# All models on NVIDIA NIM (free tier). Juror 0 = M3 (tiebreaker).
+# All models on NVIDIA NIM (free tier). Juror 0 = owl-alpha (tiebreaker).
 models = [
   "meta/llama-3.3-70b-instruct",
   "deepseek-ai/deepseek-v4-pro",
@@ -299,7 +299,7 @@ models = [
   "deepseek-ai/deepseek-v4-flash",
   "z-ai/glm-5.1",
   "moonshotai/kimi-k2.6",
-  "minimaxai/minimax-m3",  # M3 — used as tiebreaker
+  "openrouter/owl-alpha:free",  # FID-228: owl-alpha as tiebreaker (was M3)
 ]
 quorum_pct = 0.6
 timeout_secs = 45
@@ -331,22 +331,11 @@ api_key_envs = [
     "NVIDIA_API_KEY_5",
     "NVIDIA_API_KEY_6",
     "NVIDIA_API_KEY_7",
-    "NVIDIA_API_KEY_8",
-    "NVIDIA_API_KEY_9",
+    "NVIDIA_API_KEY_8",    "NVIDIA_API_KEY_9",
     "NVIDIA_API_KEY_10",
 ]
 
-# TokenRouter configuration (only used when provider = "tokenrouter")
-# OpenAI-compatible gateway: https://api.tokenrouter.com/v1
-# Supports MiniMax M3 (1M context, 512K output, 34 tok/s)
-[ai.tokenrouter]
-endpoint = "https://api.tokenrouter.com/v1"
-model = "MiniMax-M3"
-api_key_env = "TOKEN_ROUTER_API_KEY"
-
-# Sandbox configuration (FID-123) — independent from [ai]
-# Allows testing different models/providers while the engine runs in production.
-# Falls back to [ai] fields when not configured.
+# Sandbox configuration (FID-123) — independent from [ai] # Allows testing different models/providers while the engine runs in production. # Falls back to [ai] fields when not configured.
 #
 # **FID-138 (M3 thinking leak):** max_tokens=4096 constrains reasoning models
 # (MiniMax M3) so they don't exhaust the budget on chain-of-thought.
@@ -354,15 +343,15 @@ api_key_env = "TOKEN_ROUTER_API_KEY"
 #
 # Usage:
 #   cargo run --release -- --test --sandbox
-#   cargo run --release -- --test --sandbox --model minimax/minimax-m3
-#   cargo run --release -- --test --sandbox --endpoint https://api.tokenrouter.com/v1 --api-key-env TOKENROUTER_API_KEY
+#   cargo run --release -- --test --sandbox --model openrouter/owl-alpha:free
+#   cargo run --release -- --test --sandbox --endpoint https://openrouter.ai/api/v1
 [sandbox]
-endpoint = "https://api.tokenrouter.com/v1"
-model = "MiniMax-M3"
+endpoint = "https://openrouter.ai/api/v1"
+model = "openrouter/owl-alpha:free"
 api_key_env = "TOKEN_ROUTER_API_KEY"
-# Constrain thinking budget: M3 will exhaust 131K tokens on chain-of-thought.
-# 8192 gives M3 room to compute conviction scores without triggering think blocks.
-# 4096 was too tight — M3 couldn't compute trigger weights and defaulted to 0.0.
+# Constrain thinking budget for reasoning models.
+
+
 max_tokens = 8192
 temperature = 0.6
 top_p = 0.95

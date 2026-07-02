@@ -16,6 +16,7 @@ use tracing::{debug, error, info, warn};
 use crate::core::error::ExecutionError;
 use crate::core::types::{Order, OrderStatus, OrderType, Position, ScaleLevel, Side, TradeRecord};
 use crate::execution::engine::ExecutionEngine;
+pub use crate::execution::engine::RetryQueueStats;
 use crate::{log_swap, log_swap_fail, log_swap_ok, log_warn};
 
 use super::{amount_to_wei, resolve_pair_on_chain, DexBackend, SwapParams, SwapTx, TokenInfo};
@@ -502,25 +503,31 @@ pub struct DexTrader<B: DexBackend> {
     /// Anvil local forks where 0x doesn't index tokens.
     is_anvil: bool,
 
-    // ---- Retry queue (FID-035) ----
+    // ---- Retry queue (FID-035 + FID-231) ----
     /// Failed swaps that should be retried on the next cycle.
     retry_queue: Vec<RetrySwap>,
     /// Maximum retries per swap before giving up.
     max_retries: u32,
+    // ---- FID-232: External reference price for spread filter ----
+    /// When set, overrides 0x's self-reported `quote.price` field. Engine cycles
+    /// populate this from the Kraken candle cache (a fully independent price source)
+    /// so the spread filter no longer compares 0x's output against itself.
+    reference_price_override: Option<f64>,
     // ---- Balance cache (P0-1a) ----
     /// Last known on-chain balance per token address — used as fallback when query returns 0.
     balance_cache: HashMap<String, f64>,
 }
 
-/// A pending swap in the retry queue.
+/// FID-231: Pending swap in the retry queue. Simplified — quantity and entry_price
+/// were unused (place_order derives both from market state); attempts and last_error
+/// are the recovery-relevant fields.
 #[derive(Debug, Clone)]
 pub struct RetrySwap {
     pub pair: String,
     pub side: Side,
-    pub quantity: f64,
-    pub entry_price: f64,
     pub attempts: u32,
     pub last_error: String,
+    pub first_attempt_at: std::time::Instant,
 }
 
 impl<B: DexBackend + 'static> DexTrader<B> {
@@ -595,6 +602,7 @@ impl<B: DexBackend + 'static> DexTrader<B> {
             is_anvil: is_anvil_at_startup, // FID-209/FID-213: heuristic at construction; engine may override via set_is_anvil(config.mode.is_anvil)
             retry_queue: Vec::new(),
             max_retries: 3,
+            reference_price_override: None,
             balance_cache: HashMap::new(),
         };
 
@@ -862,6 +870,18 @@ impl<B: DexBackend + 'static> DexTrader<B> {
         );
     }
 
+    /// FID-232: Set the external reference price for the spread filter.
+    /// Engine cycles call this with the Kraken candle price for the pair
+    /// being evaluated. Passing `None` clears the override (the spread
+    /// filter falls back to 0x's `quote.price` field, then to Anvil bypass
+    /// or fail-closed depending on mode).
+    pub fn set_reference_price_override(&mut self, price: Option<f64>) {
+        if let Some(p) = price {
+            tracing::debug!("FID-232: reference price override set to ${:.4}", p);
+        }
+        self.reference_price_override = price;
+    }
+
     /// Register an additional chain for multi-chain execution (FID-045).
     /// Creates a new RPC client for the chain and stores its config.
     pub fn add_chain(&mut self, config: super::ChainConfig) {
@@ -885,22 +905,15 @@ impl<B: DexBackend + 'static> DexTrader<B> {
 
     // ---- Retry queue (FID-035) ----
 
-    /// Add a failed swap to the retry queue.
-    pub fn enqueue_retry(
-        &mut self,
-        pair: &str,
-        side: Side,
-        quantity: f64,
-        entry_price: f64,
-        error: &str,
-    ) {
+    /// FID-231: Add a failed swap to the retry queue. Simplified signature —
+    /// quantity and entry_price were unused (dropped from RetrySwap).
+    pub fn enqueue_retry(&mut self, pair: &str, side: Side, error: &str) {
         self.retry_queue.push(RetrySwap {
             pair: pair.to_string(),
             side,
-            quantity,
-            entry_price,
             attempts: 1,
             last_error: error.to_string(),
+            first_attempt_at: std::time::Instant::now(),
         });
         log_warn!(
             "RETRY",
@@ -935,6 +948,79 @@ impl<B: DexBackend + 'static> DexTrader<B> {
     /// Get the number of pending retries.
     pub fn pending_retries(&self) -> usize {
         self.retry_queue.len()
+    }
+
+    /// FID-231: Drain the retry queue and re-attempt each swap. Returns telemetry
+    /// stats for the engine cycle to log via SharedEngineData.activity_log.
+    ///
+    /// Behavior:
+    /// - Calls `drain_retry_queue` (logs WARN for max-retries drops internally)
+    /// - For each `to_retry`: re-attempt via `place_order` (handles its own errors)
+    /// - On success: don't re-queue (already cleared from queue)
+    /// - On failure with attempts+1 < max_retries: re-queue with attempts++
+    /// - On failure with attempts+1 >= max_retries: drop (logged WARN above)
+    ///
+    /// Cap: 30s latency budget (skip remaining retries if exceeded, log WARN).
+    pub async fn process_retry_queue(&mut self) -> RetryQueueStats {
+        let mut stats = RetryQueueStats::default();
+        let to_retry = self.drain_retry_queue();
+        stats.attempted = to_retry.len();
+        if to_retry.is_empty() {
+            return stats;
+        }
+        let start = std::time::Instant::now();
+        let budget = std::time::Duration::from_secs(30);
+        for mut item in to_retry {
+            if start.elapsed() > budget {
+                let pair_for_log = item.pair.clone();
+                log_warn!(
+                    "RETRY",
+                    "FID-231 latency budget (30s) exceeded — re-queueing {} for next cycle",
+                    pair_for_log
+                );
+                stats.requeued.push(pair_for_log);
+                self.retry_queue.push(item);
+                continue;
+            }
+            match self.place_order(&item.pair, item.side, 0.0, None).await {
+                Ok(_order) => {
+                    log_swap_ok!("RETRY", "FID-231 retry succeeded for {}", item.pair);
+                    stats.succeeded.push(item.pair.clone());
+                }
+                Err(e) => {
+                    let next_attempts = item.attempts + 1;
+                    if next_attempts >= self.max_retries {
+                        log_warn!(
+                            "RETRY",
+                            "FID-231 max retries ({}) exhausted for {} — dropping (last error: {})",
+                            self.max_retries,
+                            item.pair,
+                            e
+                        );
+                        stats.dropped.push((item.pair.clone(), e.to_string()));
+                    } else {
+                        // FID-231: clone pair snapshot first; mutate item; push to requeue.
+                        // Pattern: clone-all-first-then-move avoids E0382 (borrow-of-moved).
+                        // The compiler hint at line 993 suggested `item.clone()` but a cheaper
+                        // path is to snapshot just the pair name we need for logging/stats.
+                        let pair_for_log = item.pair.clone();
+                        item.attempts = next_attempts;
+                        item.last_error = e.to_string();
+                        log_warn!(
+                            "RETRY",
+                            "FID-231 retry {}/{} failed for {} — re-queued (error: {})",
+                            next_attempts,
+                            self.max_retries,
+                            pair_for_log,
+                            e
+                        );
+                        stats.requeued.push(pair_for_log);
+                        self.retry_queue.push(item.clone());
+                    }
+                }
+            }
+        }
+        stats
     }
 
     // ---- FID-108: Execute with retry across multiple pairs ----
@@ -985,6 +1071,12 @@ impl<B: DexBackend + 'static> DexTrader<B> {
                         queue.len()
                     );
                     failure_tracker.record_failure(base, &e.to_string(), &category);
+                    // FID-231: Only enqueue Transient failures for retry; Permanent/UserFixable
+                    // are unrecoverable (blacklist or operator action required). Filtering here
+                    // keeps the queue small (max ~3 items per cycle, bounded by active pairs).
+                    if matches!(category, ErrorCategory::Transient) {
+                        self.enqueue_retry(pair, *side, &e.to_string());
+                    }
                     last_err = Some(e);
                 }
             }
@@ -1409,19 +1501,21 @@ impl<B: DexBackend + 'static> DexTrader<B> {
                     // Effective price: sell per buy (how many sell tokens per buy token)
                     let effective_price = sell_tokens / buy_tokens;
 
-                    // Parse market price from quote (0x returns USD price, 1inch returns src amount)
+                    // Parse market price from quote (0x returns USD price, 1inch returns src amount).
+                    // NOTE: `quote.price` is 0x's self-reported USD price from the SAME response
+                    // as `effective_price` — using both creates a tautology (Nova audit #1.3).
+                    // FID-232 prefers an external reference (Kraken via `reference_price_override`).
                     let market_price_raw: f64 = quote.price.parse().unwrap_or(0.0);
 
-                    // FID-160 Fix 3: When market price unavailable, reject instead of
-                    // defaulting to effective_price (which makes spread=0, a tautology).
-                    //
-                    // FID-209 rev 2: Bypass is now config-driven via `is_anvil` field
-                    // (set by the engine from `config.mode.is_anvil` after construction).
-                    // The chain_id-based check was tried in rev 1 but failed because
-                    // the Anvil config deliberately uses Arbitrum's chain_id (42161) for
-                    // contract address resolution — see FID-209 "Why the first attempt
-                    // failed" section for the full analysis.
-                    let market_price = if market_price_raw > 0.0 {
+                    // FID-232: Prefer external reference price over 0x-self-comparison.
+                    //   1. If engine populated `reference_price_override` (Kraken candle cache),
+                    //      use it — independent of 0x inference.
+                    //   2. Else fall back to `quote.price` (existing FID-160 behavior on mainnet).
+                    //   3. Else if Anvil mode, bypass (existing FID-209 behavior).
+                    //   4. Else fail closed (existing FID-160 reject behavior).
+                    let reference_price = if let Some(override_px) = self.reference_price_override {
+                        override_px
+                    } else if market_price_raw > 0.0 {
                         market_price_raw
                     } else if self.is_anvil {
                         log_warn!(
@@ -1444,10 +1538,24 @@ impl<B: DexBackend + 'static> DexTrader<B> {
                     };
 
                     let spread_bps =
-                        ((effective_price - market_price) / market_price).abs() * 10000.0;
+                        ((effective_price - reference_price) / reference_price).abs() * 10000.0;
                     if spread_bps > 30.0 {
-                        log_warn!("SPREAD", "Rejected {} — spread {:.0}bps exceeds 30bps limit (eff=${:.6}, mkt=${:.6})",
-                            swap_params.dst_token, spread_bps, effective_price, market_price);
+                        let src = if self.reference_price_override.is_some() {
+                            "kraken_override"
+                        } else if market_price_raw > 0.0 {
+                            "0x_self"
+                        } else {
+                            "anvil_bypass"
+                        };
+                        log_warn!(
+                            "SPREAD",
+                            "Rejected {} — spread {:.0}bps exceeds 30bps limit (src={}, eff=${:.6}, ref=${:.6})",
+                            swap_params.dst_token,
+                            spread_bps,
+                            src,
+                            effective_price,
+                            reference_price
+                        );
                         return Err(ExecutionError::Other(format!(
                             "Spread {:.0}bps exceeds 30bps limit for {}",
                             spread_bps, swap_params.dst_token
@@ -1455,11 +1563,11 @@ impl<B: DexBackend + 'static> DexTrader<B> {
                     }
                     log_swap!(
                         "SPREAD",
-                        "OK: {:.0}bps for {} (eff=${:.6}, mkt=${:.6})",
+                        "OK: {:.0}bps for {} (eff=${:.6}, ref=${:.6})",
                         spread_bps,
                         swap_params.dst_token,
                         effective_price,
-                        market_price
+                        reference_price
                     );
                 }
             }
@@ -2889,11 +2997,14 @@ mod tests {
 
     #[test]
     fn config_default_is_anvil_false_via_serde() {
-        // Verify default.toml has is_anvil = false.
-        // Parsing the file directly is the safest check.
-        let toml = include_str!("../../../config/default.toml");
+        // Verify default.toml has is_anvil = false. Exercised through the
+        // production merge loader (FID-230): overlay==baseline = identity read.
+        // Any regression in the loader shows up here before hitting production startup.
+        let overlay = include_str!("../../../config/default.toml");
+        let baseline = include_str!("../../../config/default.toml");
         let cfg: crate::core::config::AppConfig =
-            toml::from_str(toml).expect("default.toml must parse");
+            crate::core::config::AppConfig::load_with_inheritance_from_str(overlay, baseline)
+                .expect("default.toml must parse through merge loader");
         assert!(
             !cfg.mode.is_anvil,
             "default.toml must have is_anvil = false"
@@ -2906,10 +3017,16 @@ mod tests {
 
     #[test]
     fn config_test_anvil_is_anvil_true_via_serde() {
-        // Verify test-anvil.toml has is_anvil = true.
-        let toml = include_str!("../../../config/test-anvil.toml");
+        // Verify test-anvil.toml has is_anvil = true. The Anvil overlay omits
+        // [ai] (FID-229 follow-on intent: inherit from default.toml); the merge
+        // loader must surface the inherited [ai] block without errors.
+        let overlay = include_str!("../../../config/test-anvil.toml");
+        let baseline = include_str!("../../../config/default.toml");
         let cfg: crate::core::config::AppConfig =
-            toml::from_str(toml).expect("test-anvil.toml must parse");
+            crate::core::config::AppConfig::load_with_inheritance_from_str(overlay, baseline)
+                .expect(
+                    "test-anvil.toml must parse through merge loader with default.toml baseline",
+                );
         assert!(
             cfg.mode.is_anvil,
             "test-anvil.toml must have is_anvil = true"
@@ -2923,9 +3040,13 @@ mod tests {
     #[test]
     fn config_canary_is_anvil_false_via_serde() {
         // Verify canary.toml has is_anvil = false (real-money on Arbitrum).
-        let toml = include_str!("../../../config/canary.toml");
+        // Canary still carries its own [ai] block, but the merge loader exercises
+        // the production code path — overlay+baseline merge must produce a valid AppConfig.
+        let overlay = include_str!("../../../config/canary.toml");
+        let baseline = include_str!("../../../config/default.toml");
         let cfg: crate::core::config::AppConfig =
-            toml::from_str(toml).expect("canary.toml must parse");
+            crate::core::config::AppConfig::load_with_inheritance_from_str(overlay, baseline)
+                .expect("canary.toml must parse through merge loader");
         assert!(!cfg.mode.is_anvil, "canary.toml must have is_anvil = false");
         assert!(
             cfg.mode.live_execution,

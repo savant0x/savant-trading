@@ -902,7 +902,7 @@ function JurySection({
           <p className="text-(--dim) tracking-wider uppercase text-[8px] font-bold">Status</p>
           <MetricRow icon="fa-power-off" label="Enabled" value={status?.enabled ? "yes" : "no"} color={status?.enabled ? "text-(--green)" : "text-(--red)"} />
           <MetricRow icon="fa-users" label="Size" value={`${status?.jury_size ?? 0} (T:${status?.regime_sizes.trending} R:${status?.regime_sizes.ranging} V:${status?.regime_sizes.volatile})`} />
-          <MetricRow icon="fa-microchip" label="M3 ctrl" value={status?.m3_control_active ? "active" : "off"} color={status?.m3_control_active ? "text-(--green)" : "text-(--dim)"} />
+          <MetricRow icon="fa-microchip" label={`${status?.control_model ?? "Agent"} ctrl`} value={status?.control_active ? "active" : "off"} color={status?.control_active ? "text-(--green)" : "text-(--dim)"} />
           <MetricRow icon="fa-robot" label="Free mods" value={status?.free_models_used?.slice(0, 2).join(", ") || "—"} />
           <MetricRow icon="fa-ban" label="Veto" value={`${status?.veto_enabled ? "on" : "off"} @ ${((status?.veto_threshold ?? 0) * 100).toFixed(0)}%`} />
           <MetricRow icon="fa-key" label="Keys" value={`${status?.key_health.healthy ?? 0}/${status?.key_health.total ?? 0} h${status?.key_health.rotating ? `, ${status.key_health.rotating} rot` : ""}`} />
@@ -916,7 +916,7 @@ function JurySection({
           <MetricRow icon="fa-comments" label="Total verdicts" value={m?.total_verdicts ?? 0} />
           <MetricRow icon="fa-circle-xmark" label="Total failures" value={m?.total_failures ?? 0} color={(m?.total_failures ?? 0) > 0 ? "text-(--amber)" : "text-(--txt)"} />
           <MetricRow icon="fa-stopwatch" label="Avg latency" value={`${avgLatency}ms`} />
-          <MetricRow icon="fa-microchip" label="M3 calls" value={status?.estimated_m3_calls ?? 0} />
+          <MetricRow icon="fa-microchip" label="Ctrl calls" value={status?.estimated_control_calls ?? 0} />
           <MetricRow icon="fa-globe" label="Free calls" value={status?.estimated_free_model_calls ?? 0} />
           {isStale && (
             <p className="text-(--amber) text-[9px] mt-1">

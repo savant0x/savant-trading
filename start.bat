@@ -58,13 +58,13 @@ set "PS_OUT=%TEMP%\savant_prebuild_%RANDOM%.txt"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_TEMP%" 2>nul
 del "%PS_TEMP%" 2>nul
 
-:: 2. Kill stale dashboard dev server AND M3 proxy (both are node.exe).
+:: 2. Kill stale dashboard dev server (node.exe).
 ::    Scoped by command-line filter: only kill node processes whose
-::    cmdline contains "savant-trading" or "m3-proxy". This protects
-::    kilo CLI and any other unrelated node processes (MCP servers,
+::    cmdline contains "savant-trading". This protects kilo CLI
+::    and any other unrelated node processes (MCP servers,
 ::    firebase-tools, playwright, etc.) that kilo spawns.
 ::    Pattern mirrors line 52's savant.exe path filter.
-> "%PS_TEMP%" echo $procs = Get-Process -Name node -ErrorAction SilentlyContinue ; foreach ($p in $procs) { $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId = $($p.Id)").CommandLine ; if ($cmd -like '*savant-trading*' -or $cmd -like '*m3-proxy*') { taskkill /F /PID $p.Id 2^>$null ; Write-Output ("Killed savant node PID " + $p.Id) } }
+> "%PS_TEMP%" echo $procs = Get-Process -Name node -ErrorAction SilentlyContinue ; foreach ($p in $procs) { $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId = $($p.Id)").CommandLine ; if ($cmd -like '*savant-trading*') { taskkill /F /PID $p.Id 2^>$null ; Write-Output ("Killed savant node PID " + $p.Id) } }
 powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_TEMP%" 2>nul
 del "%PS_TEMP%" 2>nul
 
@@ -78,17 +78,6 @@ set "PS_OUT="
 
 :: Give Windows a moment to release the file locks.
 timeout /t 2 /nobreak >nul
-
-:: ============================================================
-:: Start M3 Thinking Killer Proxy (required for MiniMax M3 in Kilo)
-:: ============================================================
-call "%~dp0m3-proxy.bat"
-if errorlevel 1 (
-    echo  WARNING: M3 proxy failed to start. Kilo will get think tags.
-) else (
-    echo  M3 proxy running on :4000.
-)
-echo.
 
 :: ============================================================
 :: Auto-start Anvil fork if not running (self-recovery).

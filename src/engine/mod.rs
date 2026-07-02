@@ -742,8 +742,8 @@ impl EngineState {
         // and create 20 keys per boot (10 from standalone + 10 from pool).
         let mut jury_pool: Option<JuryPool> = None;
         if config.ai.jury.enabled {
-            // M3 control: same LlmConfig as the main agent (M3/TokenRouter).
-            let provider_config_m3 = jury_provider_config.clone();
+            // Control juror: same LlmConfig as the main agent.
+            let provider_config_control = jury_provider_config.clone();
 
             // OpenRouter free: dedicated config pointing at openrouter.ai/api/v1.
             // Each juror uses a management-provisioned key, so api_key here is empty.
@@ -805,19 +805,20 @@ impl EngineState {
             };
 
             // M3 control API key: from TOKEN_ROUTER_API_KEY env var.
-            let m3_api_key = std::env::var(&config.ai.tokenrouter.api_key_env).unwrap_or_default();
-            if m3_api_key.is_empty() {
+            let control_api_key =
+                std::env::var(&config.ai.tokenrouter.api_key_env).unwrap_or_default();
+            if control_api_key.is_empty() {
                 warn!(
-                    "FID-147: {} not set — M3 control juror will fail to authenticate",
+                    "FID-147: {} not set — control juror will fail to authenticate",
                     config.ai.tokenrouter.api_key_env
                 );
             }
 
             let jp = JuryPool::new(
-                provider_config_m3,
+                provider_config_control,
                 provider_config_openrouter,
                 provider_config_nvidia,
-                m3_api_key,
+                control_api_key,
                 nvidia_api_keys,
                 JuryKeyManager::new(
                     OpenRouterManagementClient::with_endpoint(
@@ -1341,10 +1342,35 @@ pub async fn run(
     const CLOSE_COOLDOWN_SECS: u64 = 1800;
     const SL_HALT_THRESHOLD: u32 = 3;
     const _SL_HALT_SECS: u64 = 3600;
-
     loop {
         tick += 1;
         let cycle_start = std::time::Instant::now();
+        // FID-231: Drain retry queue before any LLM-decision work (top of cycle).
+        // Re-attempts failed swaps from previous cycles (enqueued by execute_with_retry
+        // on transient errors). Telemetry logged via shared.log_activity.
+        if let Some(ref mut ex) = executor {
+            let retry_stats = ex.process_retry_queue().await;
+            if retry_stats.attempted > 0 {
+                let _ = shared
+                    .log_activity(
+                        savant_trading::core::shared::ActivityLevel::Info,
+                        Some("EXEC"),
+                        "-",
+                        &format!(
+                            "FID-231 retry: attempted={} succeeded={} requeued={} dropped={}",
+                            retry_stats.attempted,
+                            retry_stats.succeeded.len(),
+                            retry_stats.requeued.len(),
+                            retry_stats.dropped.len()
+                        ),
+                    )
+                    .await;
+            }
+            // FID-232: Set reference price override to None for now (spread filter
+            // falls back to 0x's quote.price or Anvil bypass). A future follow-up
+            // should wire Kraken candle prices here for independent price verification.
+            ex.set_reference_price_override(None);
+        }
 
         // FID-155 / DECISION-015: Periodic chain-driven reconciliation.
         // Every 5 minutes wall-clock, re-query the chain for token balances
@@ -2982,7 +3008,8 @@ pub async fn run(
                             savant_trading::core::shared::JuryStateSnapshot {
                                 enabled: config.ai.jury.enabled,
                                 jury_size: config.ai.jury.jury_size,
-                                m3_control_active: true,
+                                control_active: true,
+                                control_model: config.ai.model.clone(),
                                 free_models_used: if config.ai.jury.models.is_empty() {
                                     vec![config.ai.jury.model.clone()]
                                 } else {
@@ -2993,7 +3020,7 @@ pub async fn run(
                                 regime_sizes: config.ai.jury.regime_sizes.clone(),
                                 cumulative: jp.metrics().clone(),
                                 key_health,
-                                estimated_m3_calls: jp.m3_calls(),
+                                estimated_control_calls: jp.control_calls(),
                                 estimated_free_model_calls: jp.free_model_calls(),
                                 veto_flag_active_now: jp.veto_flag_active(),
                                 last_cycle_at: Some(cycle_ts),
