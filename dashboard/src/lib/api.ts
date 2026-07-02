@@ -181,7 +181,8 @@ export interface JuryKeyHealth {
 export interface JuryStateSnapshot {
   enabled: boolean;
   jury_size: number;
-  m3_control_active: boolean;
+  control_active: boolean;
+  control_model: string;
   free_models_used: string[];
   veto_enabled: boolean;
   veto_threshold: number;
@@ -194,7 +195,7 @@ export interface JuryStateSnapshot {
     total_latency_ms: number;
   };
   key_health: JuryKeyHealth;
-  estimated_m3_calls: number;
+  estimated_control_calls: number;
   estimated_free_model_calls: number;
   veto_flag_active_now: boolean;
   last_cycle_at: string | null;

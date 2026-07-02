@@ -23,9 +23,9 @@ use crate::jury_state;
 ///
 /// **FID-147 (jury dual-path):** The jury uses TWO distinct API paths:
 ///
-/// - **Juror 0 (M3 control):** `provider_config_m3` + `m3_api_key`. Endpoint
-///   points to the M3/TokenRouter proxy. Same path as the main agent. Does
-///   NOT participate in management-key rotation.
+/// - **Juror 0 (control / influencer):** `provider_config_control` + `control_api_key`.
+///   Same LLM config and endpoint as the main agent. Does NOT participate
+///   in management-key rotation.
 ///
 /// - **Jurors 1..N (free):** `provider_config_openrouter` + management keys
 ///   from `key_manager`. Endpoint MUST be `https://openrouter.ai/api/v1`.
@@ -36,15 +36,15 @@ use crate::jury_state;
 ///   must contain valid NVIDIA model slugs (e.g., `meta/llama-3.3-70b-instruct`).
 ///   OpenRouter remains the fallback if NVIDIA calls fail.
 pub struct JuryPool {
-    /// LlmConfig for the M3 control juror (juror 0). Endpoint = M3/TokenRouter.
-    provider_config_m3: LlmConfig,
+    /// LlmConfig for the control juror (juror 0). Same config as the main agent.
+    provider_config_control: LlmConfig,
     /// LlmConfig for OpenRouter free jurors (1..N). Endpoint = openrouter.ai.
     provider_config_openrouter: LlmConfig,
     /// FID-200: LlmConfig for NVIDIA NIM free jurors (1..N). When Some,
     /// jurors use NVIDIA. When None, jurors fall back to OpenRouter.
     provider_config_nvidia: Option<LlmConfig>,
-    /// API key for the M3 control juror — from `TOKEN_ROUTER_API_KEY`.
-    m3_api_key: String,
+    /// API key for the control juror — from `TOKEN_ROUTER_API_KEY`.
+    control_api_key: String,
     /// FID-204: NVIDIA API keys for per-juror rate-limit isolation.
     /// Each juror N (N >= 1) uses keys[(N-1) % keys.len()]. Empty Vec = legacy
     /// single-key behavior (use the api_key in provider_config_nvidia).
@@ -63,8 +63,8 @@ pub struct JuryPool {
     metrics: JuryPoolMetrics,
     /// Monotonic cycle counter (FID-162).
     cycle_id: AtomicU64,
-    /// M3 control juror call count (free, visibility only — per Spencer 2026-06-15).
-    m3_calls: AtomicU64,
+    /// control juror call count (free, visibility only — per Spencer 2026-06-15).
+    control_calls: AtomicU64,
     /// Free OpenRouter model call count (always $0).
     free_model_calls: AtomicU64,
     /// FID-200: NVIDIA NIM model call count.
@@ -104,7 +104,7 @@ pub struct VerdictBreakdown {
 /// FID-162: Per-juror detail within a cycle record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JurorRecord {
-    pub juror_id: usize, // 0 = M3 control, 1..N = free
+    pub juror_id: usize, // 0 = control, 1..N = free
     pub model_slug: String,
     pub verdict: String, // "BUY" | "SELL" | "HOLD" | "PARSE_FAIL" | "TIMEOUT"
     pub confidence: f64,
@@ -224,10 +224,10 @@ impl JuryPool {
     /// isolation. Empty Vec = legacy single-key mode (use api_key from
     /// provider_config_nvidia for all jurors).
     pub fn new(
-        provider_config_m3: LlmConfig,
+        provider_config_control: LlmConfig,
         provider_config_openrouter: LlmConfig,
         provider_config_nvidia: Option<LlmConfig>,
-        m3_api_key: String,
+        control_api_key: String,
         nvidia_api_keys: Vec<String>,
         key_manager: JuryKeyManager,
         config: JuryConfig,
@@ -238,10 +238,10 @@ impl JuryPool {
         let _ = std::fs::create_dir_all("dev/logs");
 
         Self {
-            provider_config_m3,
+            provider_config_control,
             provider_config_openrouter,
             provider_config_nvidia,
-            m3_api_key,
+            control_api_key,
             nvidia_api_keys,
             model_cooldowns: Mutex::new(HashMap::new()),
             key_manager,
@@ -249,7 +249,7 @@ impl JuryPool {
             jury_system_prompt,
             metrics: JuryPoolMetrics::default(),
             cycle_id: AtomicU64::new(0),
-            m3_calls: AtomicU64::new(0),
+            control_calls: AtomicU64::new(0),
             free_model_calls: AtomicU64::new(0),
             nvidia_calls: AtomicU64::new(0),
             recent_cycles: Mutex::new(VecDeque::with_capacity(RECENT_CYCLES_CAP)),
@@ -276,9 +276,9 @@ impl JuryPool {
         self.cycle_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Total M3 control juror calls.
-    pub fn m3_calls(&self) -> u64 {
-        self.m3_calls.load(Ordering::Relaxed)
+    /// Total control juror calls.
+    pub fn control_calls(&self) -> u64 {
+        self.control_calls.load(Ordering::Relaxed)
     }
 
     /// Total free-model juror calls.
@@ -370,8 +370,8 @@ impl JuryPool {
         info!(
             "Jury: evaluating with {} members (regime: {:?}, quorum: {})",
             jury_size, regime, quorum
-        ); // FID-147: Filter JuryConfig.models to exclude the M3 marker entry.
-           // The M3 model is sourced from `provider_config_m3.model` for juror 0.
+        ); // FID-147: Filter JuryConfig.models to exclude the control marker entry.
+           // The control model is sourced from `provider_config_control.model` for juror 0.
         let free_models: Vec<String> = self
             .config
             .models
@@ -386,26 +386,26 @@ impl JuryPool {
         // Spawn N parallel jury member calls
         let mut join_set = tokio::task::JoinSet::new();
         for juror_idx in 0..jury_size {
-            // FID-147: Juror 0 is the M3 control — uses M3 config + M3 key (no management).
+            // FID-147: Juror 0 is the control — uses control config + control key (no management).
             // Jurors 1..N are free — use OpenRouter config + management-provisioned keys.
             let is_m3_control = juror_idx == 0;
 
-            // FID-162: count M3 vs free-model calls (free, visibility only).
+            // FID-162: count control vs free-model calls (free, visibility only).
             if is_m3_control {
-                self.m3_calls.fetch_add(1, Ordering::Relaxed);
+                self.control_calls.fetch_add(1, Ordering::Relaxed);
             } else {
                 self.free_model_calls.fetch_add(1, Ordering::Relaxed);
             }
 
             let (provider, model, api_key, key_label, key_hash) = if is_m3_control {
-                let provider = LlmProvider::new(self.provider_config_m3.clone());
-                let model = self.provider_config_m3.model.clone();
+                let provider = LlmProvider::new(self.provider_config_control.clone());
+                let model = self.provider_config_control.model.clone();
                 let label = format!("m3-control-{}", chrono::Utc::now().timestamp());
-                // Empty hash — M3 control doesn't participate in key rotation
+                // Empty hash — control doesn't participate in key rotation
                 (
                     provider,
                     model,
-                    self.m3_api_key.clone(),
+                    self.control_api_key.clone(),
                     label,
                     String::new(),
                 )
@@ -501,7 +501,7 @@ impl JuryPool {
                 let model = if !free_models.is_empty() {
                     free_models[(juror_idx - 1) % free_models.len()].clone()
                 } else {
-                    // No free models configured (or all filtered as M3 markers).
+                    // No free models configured (or all filtered as control markers).
                     // Legacy fallback: use the single `model` field for all free jurors.
                     self.config.model.clone()
                 };
@@ -559,7 +559,7 @@ impl JuryPool {
                             );
                             model_ids.push(label);
                             verdicts.push(v);
-                            // FID-147: M3 control has empty hash (no management) — skip rotation.
+                            // FID-147: control has empty hash (no management) — skip rotation.
                             if !hash.is_empty() {
                                 let _ = self.key_manager.record_success(&hash).await;
                             }
@@ -770,7 +770,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.models.len(), 10);
-        // M3 is juror 9 (last), used as tiebreaker.
+        // control is juror 9 (last), used as tiebreaker.
         assert!(config.models.last().unwrap().contains("minimax-m3"));
     }
 

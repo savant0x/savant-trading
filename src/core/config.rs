@@ -22,6 +22,11 @@ pub struct AppConfig {
     pub training: TrainingConfig,
     #[serde(default)]
     pub chains: HashMap<String, ChainEntry>,
+    /// FID-233: when true, the engine emits per-pair ATR/volume/spread stats
+    /// to `data/observability/pair_stats_YYYYMMDD.jsonl` each cycle (decision phase).
+    /// Used by Spencer's 24h Anvil observation runbook to validate Soul v3.0 universe fit.
+    #[serde(default)]
+    pub log_pair_stats: bool,
 }
 
 /// Per-chain configuration for multi-chain support (FID-045).
@@ -442,7 +447,7 @@ fn default_jury_models() -> Vec<String> {
         "qwen/qwen3-coder:free".into(),
         "qwen/qwen3-next-80b-a3b-instruct:free".into(),
         "openai/gpt-oss-120b:free".into(),
-        "minimax/minimax-m3".into(),
+        "openrouter/owl-alpha:free".into(),
     ]
 }
 fn default_quorum_pct() -> f64 {
@@ -1064,10 +1069,67 @@ impl AppConfig {
         }
         Ok(())
     }
-}
 
-impl Default for AppConfig {
-    fn default() -> Self {
+    // FID-230 — Two-phase config loader. Phase 1 reads `baseline_path`
+    // (must succeed: fail-fast on missing eliminates the silent-fallback
+    // landmine introduced by the previous "missing config = defaults" path).
+    // Phase 2 reads `path` (may equal baseline_path). When path != baseline_path,
+    // recursively merges the overlay's TOML AST onto the baseline. Single-pass
+    // AppConfig::deserialize + validate. Recursive merge semantics: leaf
+    // scalars/arrays replace; tables recurse. Future AppConfig fields inherit
+    // automatically because no per-field merge logic is hard-coded.
+    pub fn load_with_inheritance(path: &Path, baseline_path: &Path) -> Result<Self, ConfigError> {
+        let mut base: toml::Value =
+            load_toml(baseline_path).map_err(|e| ConfigError::BaselineError {
+                path: baseline_path.to_path_buf(),
+                reason: format!("load_toml failed: {}", e),
+            })?;
+
+        if path != baseline_path {
+            let overlay = load_toml(path)?;
+            merge_toml_tables(&mut base, overlay);
+        }
+
+        let cfg: AppConfig = base.try_into().map_err(|e: toml::de::Error| {
+            ConfigError::ParseError(format!(
+                "merged config (baseline={}, overlay={}): {}",
+                baseline_path.display(),
+                path.display(),
+                e
+            ))
+        })?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// FID-230 test-friendly shim. Mirrors `load_with_inheritance` but reads
+    /// inline strings instead of disk. Used by `src/execution/dex/trader.rs`
+    /// `config_*_via_serde` tests to validate in-memory TOML through the
+    /// production merge path. Treats overlay as effective regardless of
+    /// whether literal differs from baseline (caller chooses).
+    pub fn load_with_inheritance_from_str(
+        overlay_str: &str,
+        baseline_str: &str,
+    ) -> Result<Self, ConfigError> {
+        let mut base: toml::Value =
+            toml::from_str(baseline_str).map_err(|e| ConfigError::BaselineError {
+                path: std::path::PathBuf::from("<inline-baseline>"),
+                reason: format!("baseline TOML parse: {}", e),
+            })?;
+        let overlay: toml::Value = toml::from_str(overlay_str)
+            .map_err(|e| ConfigError::ParseError(format!("overlay TOML parse: {}", e)))?;
+        if overlay_str != baseline_str {
+            merge_toml_tables(&mut base, overlay);
+        }
+        let cfg: AppConfig = base.try_into().map_err(|e: toml::de::Error| {
+            ConfigError::ParseError(format!("merged in-memory configs: {}", e))
+        })?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn default() -> Self {
         Self {
             exchange: ExchangeConfig {
                 name: "candle_feed".into(),
@@ -1184,6 +1246,7 @@ impl Default for AppConfig {
             },
             training: TrainingConfig::default(),
             chains: HashMap::new(),
+            log_pair_stats: false,
         }
     }
 }
@@ -1335,6 +1398,288 @@ mod tests {
                 assert_eq!(keys, vec!["k1", "k2"]); // legacy not included
             },
         );
+    }
+
+    // ----------------------------------------------------------------------------
+    // FID-230: merge-loader regression tests.
+    // Five independent anchors target different facets of `merge_toml_tables`.
+    // Failures here = structural drift in the inheritance semantics; the
+    // production `load_with_inheritance` callsites will start misbehaving
+    // simultaneously.
+    // ----------------------------------------------------------------------------
+
+    /// Test 1: Round-trip parse with overlay == baseline (no-op merge).
+    /// Producer path is `production load` for a single config. Must parse
+    /// cleanly through the merge loader.
+    #[test]
+    fn fid230_loader_round_trip_identity() {
+        let overlay = include_str!("../../config/default.toml");
+        let baseline = include_str!("../../config/default.toml");
+        let cfg = AppConfig::load_with_inheritance_from_str(overlay, baseline)
+            .expect("identity round-trip parse");
+        assert!(!cfg.mode.is_anvil);
+        assert!(!cfg.mode.live_execution);
+        assert!(!cfg.trading.pairs.is_empty());
+    }
+
+    /// Test 2: Overlay overrides a baseline scalar (key-win semantics).
+    /// A new top-level value wins over baseline; untouched baseline keys
+    /// remain intact.
+    #[test]
+    fn fid230_loader_overlay_overrides_baseline_scalar() {
+        let overlay = r#"
+[mode]
+is_anvil = true
+live_execution = true
+"#;
+        let baseline = include_str!("../../config/default.toml");
+        let cfg = AppConfig::load_with_inheritance_from_str(overlay, baseline)
+            .expect("overlay overrides scalar");
+        assert!(cfg.mode.is_anvil);
+        assert!(cfg.mode.live_execution);
+        // Baseline [trading] preserved (overlay doesn't touch it).
+        assert!(!cfg.trading.pairs.is_empty());
+    }
+
+    /// Test 3: Overlay extends baseline (additive missing-table case).
+    /// test-anvil.toml deliberately omits `[ai]` — the merge loader must
+    /// surface the inherited `[ai]` block from default.toml with no parse
+    /// errors. This is the canonical "Anvil inherits defaults" scenario.
+    #[test]
+    fn fid230_loader_overlay_inherits_missing_table() {
+        let overlay = include_str!("../../config/test-anvil.toml");
+        let baseline = include_str!("../../config/default.toml");
+        let cfg = AppConfig::load_with_inheritance_from_str(overlay, baseline)
+            .expect("test-anvil inherits [ai] from default baseline");
+        assert!(cfg.mode.is_anvil, "overlay mode wins");
+        assert!(cfg.mode.live_execution);
+        // Inherited [ai] block: provider should match default's openrouter.
+        assert_eq!(cfg.ai.provider, "openrouter");
+    }
+
+    /// Test 4: Baseline parse failure surfaces `ConfigError::BaselineError`
+    /// with the synthetic inline path. Critical: a corrupted baseline must
+    /// fail loudly (ECHO Law 14) — never silently fall through to the merged
+    /// config or default-merciless fallback path.
+    #[test]
+    fn fid230_loader_baseline_failure_surfaces_baseline_error() {
+        let overlay = r#"
+[mode]
+live_execution = false
+is_anvil = false
+"#;
+        let bad_baseline = "this is = not [valid toml";
+        match AppConfig::load_with_inheritance_from_str(overlay, bad_baseline) {
+            Err(ConfigError::BaselineError { path, reason }) => {
+                assert_eq!(path.to_string_lossy(), "<inline-baseline>");
+                assert!(reason.contains("baseline TOML parse"));
+            }
+            other => panic!("expected BaselineError, got {:?}", other),
+        }
+    }
+
+    /// Test 5: Overlay parse failure surfaces `ConfigError::ParseError`
+    /// (NOT BaselineError — only baseline failures get the dedicated variant).
+    /// This codifies the asymmetry: baseline is mandatory, overlay is on top.
+    #[test]
+    fn fid230_loader_overlay_parse_failure_surfaces_parse_error() {
+        let overlay = "this is = not [valid toml";
+        let baseline = include_str!("../../config/default.toml");
+        match AppConfig::load_with_inheritance_from_str(overlay, baseline) {
+            Err(ConfigError::ParseError(msg)) => {
+                assert!(msg.contains("overlay TOML parse"));
+            }
+            other => panic!("expected ParseError, got {:?}", other),
+        }
+    }
+
+    /// Test 6 (code-reviewer critical #1): Deep-nesting merge. Validates
+    /// `merge_toml_tables` recursive descent through arbitrarily nested
+    /// tables. Without this, a regression that flattens recursion to
+    /// one-level-only would silently pass the top-level tests above.
+    #[test]
+    fn fid230_loader_deep_nested_merge() {
+        let overlay = r#"
+[trading]
+starting_balance = 250.0
+
+[trading.funnel_v1]
+enabled = true
+top_k = 5
+"#;
+        let baseline = include_str!("../../config/default.toml");
+        let cfg = AppConfig::load_with_inheritance_from_str(overlay, baseline)
+            .expect("deep nested merge");
+        // Top-level overlay wins.
+        assert_eq!(cfg.trading.starting_balance, 250.0);
+        // Nested overlay wins (recursive descent into [trading.funnel_v1]).
+        assert!(cfg.trading.funnel_v1.enabled);
+        assert_eq!(cfg.trading.funnel_v1.top_k, 5);
+        // Baseline non-overridden keys preserved.
+        assert!(!cfg.trading.pairs.is_empty());
+    }
+
+    /// Test 7 (code-reviewer critical #2): Disk-version
+    /// `load_with_inheritance` (not just `_from_str`). Writes temp TOML
+    /// files and exercises the production `load_toml` → `merge_toml_tables`
+    /// → `try_into` chain end-to-end. Zero coverage of the disk-bound path
+    /// before this — a TOML parser change would silently break production
+    /// startup with no test wall.
+    #[test]
+    fn fid230_loader_disk_version_round_trip() {
+        let tmp_baseline = std::env::temp_dir().join("fid230_baseline.toml");
+        let tmp_overlay = std::env::temp_dir().join("fid230_overlay.toml");
+        // Minimal baseline TOML with all required AppConfig fields. Kept
+        // small to focus on the disk-load path rather than field completeness.
+        let baseline_toml = r#"
+[exchange]
+name = "test"
+ws_url = "wss://test"
+rest_url = "https://test"
+
+[trading]
+pairs = ["BTC/USD"]
+scan_all_pairs = false
+timeframe = "5m"
+timeframes = ["5m"]
+base_currency = "USD"
+starting_balance = 100.0
+database_url = "sqlite::memory:"
+fee_rate = 0.001
+slippage_pct = 0.001
+
+[risk]
+max_risk_per_trade = 0.005
+max_daily_loss = 0.05
+max_drawdown = 0.5
+max_positions = 1
+min_rr_ratio = 1.5
+
+[strategy.momentum]
+ema_period = 100
+volume_spike_multiplier = 2.0
+atr_compression_threshold = 0.7
+
+[strategy.mean_reversion]
+profile_periods = 100
+value_area_pct = 0.7
+volume_spike_multiplier = 1.5
+
+[strategy.regime]
+adx_period = 14
+adx_trending_threshold = 25.0
+adx_ranging_threshold = 20.0
+atr_volatility_multiplier = 1.5
+
+[mode]
+live_execution = false
+is_anvil = false
+
+[ai]
+provider = "openrouter"
+endpoint = "https://openrouter.ai/api/v1"
+model = "openrouter/owl-alpha"
+api_key_env = "OPENROUTER_API_KEY"
+autonomy_level = 3
+max_decisions_per_hour = 20
+context_window_candles = 500
+knowledge_token_budget = 12000
+price_tolerance_pct = 1.0
+max_retries = 3
+temperature = 0.6
+top_p = 0.95
+max_tokens = 4096
+
+[insight]
+funding_rate_enabled = true
+liquidation_enabled = true
+fear_greed_enabled = true
+btc_dominance_enabled = true
+exchange_flows_enabled = true
+news_sentiment_enabled = true
+rss_enabled = true
+rss_max_items = 10
+onchain_enabled = true
+"#;
+        std::fs::write(&tmp_baseline, baseline_toml).expect("write baseline tmp");
+        std::fs::write(&tmp_overlay, baseline_toml).expect("write overlay tmp");
+
+        // Disk-bound path: not the _from_str shim.
+        let cfg = AppConfig::load_with_inheritance(&tmp_overlay, &tmp_baseline)
+            .expect("disk load round trip via load_with_inheritance");
+        assert_eq!(cfg.trading.starting_balance, 100.0);
+        assert!(!cfg.mode.is_anvil);
+
+        let _ = std::fs::remove_file(&tmp_baseline);
+        let _ = std::fs::remove_file(&tmp_overlay);
+    }
+
+    /// Test 8 (code-reviewer critical #4): Duplicate-key regression. The
+    /// FID-229 follow-on bug surfaced when `[ai.nvidia]` carried a stray
+    /// `api_key_env = ...` line that TOML interpreted as a duplicate key.
+    /// The merge loader must surface this loud and clear (not silently
+    /// swallow it). Acceptable variants: `ParseError` OR `BaselineError`
+    /// depending on which side carries the duplicate — what matters is
+    /// loud failure, not silent override.
+    #[test]
+    fn fid230_loader_duplicate_key_rejected_loudly() {
+        let overlay = r#"
+[ai]
+provider = "openrouter"
+
+[ai.nvidia]
+endpoint = "https://x"
+api_key_env = "NVIDIA"
+api_key_env = "DUPLICATE"
+"#;
+        let baseline = include_str!("../../config/default.toml");
+        match AppConfig::load_with_inheritance_from_str(overlay, baseline) {
+            Err(ConfigError::ParseError(_)) | Err(ConfigError::BaselineError { .. }) => {
+                // Either variant is acceptable — what matters is loud failure.
+            }
+            other => panic!(
+                "expected ParseError or BaselineError on duplicate key, got {:?}",
+                other
+            ),
+        }
+    }
+}
+
+// FID-230 free-function helpers for the merge loader. Co-located next to the
+// `tests` module so the merge loader + helpers + tests sit together for
+// reviewers. ~30 LOC combined.
+fn load_toml(path: &Path) -> Result<toml::Value, ConfigError> {
+    let content = std::fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
+    toml::from_str(&content)
+        .map_err(|e| ConfigError::ParseError(format!("{}: {}", path.display(), e)))
+}
+
+/// Recursive union of `overlay` onto `base`. Leaf scalars/arrays: overlay
+/// wins. Tables: recurse, then overlay's keys extend base's. Matches the
+/// Helm/k8s/`figment`/`config` crate semantics so future fields inherit
+/// without code edits.
+fn merge_toml_tables(base: &mut toml::Value, overlay: toml::Value) {
+    use toml::Value;
+    match overlay {
+        Value::Table(overlay_map) => {
+            // Both tables: recursive union. Early-return so the consumed
+            // overlay_map is gone before we'd otherwise touch `base` again.
+            if let Value::Table(base_map) = base {
+                for (key, overlay_val) in overlay_map {
+                    match base_map.get_mut(&key) {
+                        Some(existing) => merge_toml_tables(existing, overlay_val),
+                        None => {
+                            base_map.insert(key, overlay_val);
+                        }
+                    }
+                }
+                return;
+            }
+            // Overlay is a table but base isn't — replace base wholesale.
+            *base = Value::Table(overlay_map);
+        }
+        // Leaf (scalar, array, bool, or other non-table): overlay wins.
+        non_table => *base = non_table,
     }
 }
 

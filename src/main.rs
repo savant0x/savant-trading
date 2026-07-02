@@ -167,13 +167,17 @@ async fn main() -> anyhow::Result<()> {
         .flatten()
         .collect();
 
-    let config = AppConfig::load(Path::new(&config_path)).unwrap_or_else(|e| {
-        warn!(
-            "Config load failed from '{}' ({}), using defaults",
-            config_path, e
-        );
-        AppConfig::default()
-    });
+    eprintln!("DEBUG: About to load config from '{}'", config_path);
+    let config =
+        AppConfig::load_with_inheritance(Path::new(&config_path), Path::new("config/default.toml"))
+            .unwrap_or_else(|e| {
+                eprintln!("DEBUG FATAL: Config load failed: {}", e);
+                std::process::exit(1);
+            });
+    eprintln!(
+        "DEBUG: Config loaded successfully, model={}",
+        config.ai.model
+    );
 
     match args.get(1).map(|s| s.as_str()) {
         Some("report") => {
@@ -614,7 +618,10 @@ async fn emergency_liquidate() -> anyhow::Result<()> {
         .and_then(|w| w.get(1))
         .cloned()
         .unwrap_or_else(|| "config/default.toml".to_string());
-    let config = savant_trading::core::config::AppConfig::load(std::path::Path::new(&config_path))?;
+    let config = savant_trading::core::config::AppConfig::load_with_inheritance(
+        std::path::Path::new(&config_path),
+        std::path::Path::new("config/default.toml"),
+    )?;
     // FID-211 (audit Finding 1.1): Wrap in WalletKey so the secret is type-safe
     // (Display/Debug redact, zeroize-on-drop). expose_secret() is called only at
     // the signing key construction + DexTrader::new call sites below.

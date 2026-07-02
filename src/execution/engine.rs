@@ -2,6 +2,19 @@ use async_trait::async_trait;
 
 use crate::core::types::{Order, Position, Side};
 
+/// FID-231: Stats returned by `process_retry_queue` for engine telemetry.
+#[derive(Debug, Clone, Default)]
+pub struct RetryQueueStats {
+    /// Total items drained from queue at cycle start.
+    pub attempted: usize,
+    /// Pairs that succeeded on retry (cleared from queue permanently).
+    pub succeeded: Vec<String>,
+    /// Items pushed back with attempts incremented (still recoverable).
+    pub requeued: Vec<String>,
+    /// Items dropped because attempts >= max_retries (logged WARN).
+    pub dropped: Vec<(String, String)>,
+}
+
 #[async_trait]
 pub trait ExecutionEngine: Send + Sync {
     async fn place_order(
@@ -99,4 +112,15 @@ pub trait ExecutionEngine: Send + Sync {
     fn chain_id(&self) -> u64 {
         0
     }
+
+    /// FID-231: Drain the retry queue and re-attempt failed swaps.
+    /// Default implementation returns empty stats (no retry queue).
+    async fn process_retry_queue(&mut self) -> RetryQueueStats {
+        RetryQueueStats::default()
+    }
+
+    /// FID-232: Set an external reference price for the spread filter.
+    /// When set, the spread filter compares against this price instead of
+    /// the DEX API's self-reported `quote.price`. Default: no-op.
+    fn set_reference_price_override(&mut self, _price: Option<f64>) {}
 }

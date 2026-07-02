@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -8,6 +9,10 @@ pub enum ConfigError {
     ParseError(String),
     #[error("Validation error: {0}")]
     ValidationError(String),
+    // FID-230: baseline load failure for `AppConfig::load_with_inheritance`.
+    // Path wrapped so operator can grep baseline TOML + see what was wrong.
+    #[error("config baseline load failed for {path}: {reason}", path = .path.display(), reason = .reason)]
+    BaselineError { path: PathBuf, reason: String },
 }
 
 #[derive(Error, Debug)]
